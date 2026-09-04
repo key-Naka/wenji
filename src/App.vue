@@ -10,6 +10,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Tags,
   Trash2,
   X,
 } from '@lucide/vue'
@@ -28,7 +29,17 @@ type QuestionGroup = {
   questions: Question[]
 }
 
+type Term = {
+  id: string
+  name: string
+  definition: string
+  updatedAt: number
+}
+
+type View = 'questions' | 'terms'
+
 const STORAGE_KEY = 'interview-notebook-groups'
+const TERMS_STORAGE_KEY = 'interview-notebook-terms'
 const makeId = () => crypto.randomUUID()
 
 const sampleGroups: QuestionGroup[] = [
@@ -76,7 +87,18 @@ function loadGroups(): QuestionGroup[] {
   }
 }
 
+function loadTerms(): Term[] {
+  try {
+    const saved = localStorage.getItem(TERMS_STORAGE_KEY)
+    return saved ? JSON.parse(saved) : []
+  } catch {
+    return []
+  }
+}
+
 const groups = ref<QuestionGroup[]>(loadGroups())
+const terms = ref<Term[]>(loadTerms())
+const activeView = ref<View>('questions')
 const selectedGroupId = ref(groups.value[0]?.id ?? '')
 const query = ref('')
 const showGroupForm = ref(false)
@@ -87,10 +109,20 @@ const editorOpen = ref(false)
 const editingQuestionId = ref<string | null>(null)
 const draftTitle = ref('')
 const draftAnswer = ref('')
+const termEditorOpen = ref(false)
+const editingTermId = ref<string | null>(null)
+const draftTermName = ref('')
+const draftTermDefinition = ref('')
 
 watch(
   groups,
   (value) => localStorage.setItem(STORAGE_KEY, JSON.stringify(value)),
+  { deep: true },
+)
+
+watch(
+  terms,
+  (value) => localStorage.setItem(TERMS_STORAGE_KEY, JSON.stringify(value)),
   { deep: true },
 )
 
@@ -106,6 +138,16 @@ const visibleQuestions = computed(() => {
     (question) =>
       question.title.toLowerCase().includes(keyword) ||
       question.answer.toLowerCase().includes(keyword),
+  )
+})
+
+const visibleTerms = computed(() => {
+  const keyword = query.value.trim().toLowerCase()
+  if (!keyword) return terms.value
+  return terms.value.filter(
+    (term) =>
+      term.name.toLowerCase().includes(keyword) ||
+      term.definition.toLowerCase().includes(keyword),
   )
 })
 
@@ -142,7 +184,14 @@ function createGroup() {
 }
 
 function selectGroup(id: string) {
+  activeView.value = 'questions'
   selectedGroupId.value = id
+  query.value = ''
+  sidebarOpen.value = false
+}
+
+function showTerms() {
+  activeView.value = 'terms'
   query.value = ''
   sidebarOpen.value = false
 }
@@ -168,6 +217,11 @@ function openEditQuestion(question: Question) {
   draftTitle.value = question.title
   draftAnswer.value = question.answer
   editorOpen.value = true
+}
+
+function closeEditorFromBackdrop() {
+  if (draftTitle.value.trim() || draftAnswer.value.trim()) return
+  editorOpen.value = false
 }
 
 function saveQuestion() {
@@ -206,6 +260,52 @@ function removeQuestion(question: Question) {
     (item) => item.id !== question.id,
   )
 }
+
+function openCreateTerm() {
+  editingTermId.value = null
+  draftTermName.value = ''
+  draftTermDefinition.value = ''
+  termEditorOpen.value = true
+}
+
+function openEditTerm(term: Term) {
+  editingTermId.value = term.id
+  draftTermName.value = term.name
+  draftTermDefinition.value = term.definition
+  termEditorOpen.value = true
+}
+
+function closeTermEditorFromBackdrop() {
+  if (draftTermName.value.trim() || draftTermDefinition.value.trim()) return
+  termEditorOpen.value = false
+}
+
+function saveTerm() {
+  const name = draftTermName.value.trim()
+  if (!name) return
+
+  if (editingTermId.value) {
+    const term = terms.value.find((item) => item.id === editingTermId.value)
+    if (term) {
+      term.name = name
+      term.definition = draftTermDefinition.value.trim()
+      term.updatedAt = Date.now()
+    }
+  } else {
+    terms.value.unshift({
+      id: makeId(),
+      name,
+      definition: draftTermDefinition.value.trim(),
+      updatedAt: Date.now(),
+    })
+  }
+  termEditorOpen.value = false
+}
+
+function removeTerm(term: Term) {
+  if (!confirm(`确定删除“${term.name}”吗？`)) return
+  terms.value = terms.value.filter((item) => item.id !== term.id)
+}
 </script>
 
 <template>
@@ -221,6 +321,17 @@ function removeQuestion(question: Question) {
           <X :size="19" />
         </button>
       </div>
+
+      <button
+        class="terms-nav-button"
+        :class="{ active: activeView === 'terms' }"
+        @click="showTerms"
+      >
+        <Tags :size="17" />
+        <span>专有名词表</span>
+        <span class="group-count">{{ terms.length }}</span>
+        <ChevronRight :size="15" />
+      </button>
 
       <div class="sidebar-section-header">
         <span>问题组</span>
@@ -245,7 +356,7 @@ function removeQuestion(question: Question) {
           v-for="group in groups"
           :key="group.id"
           class="group-item"
-          :class="{ active: group.id === selectedGroupId }"
+          :class="{ active: activeView === 'questions' && group.id === selectedGroupId }"
         >
           <button class="group-select" @click="selectGroup(group.id)">
             <span class="group-dot"></span>
@@ -282,13 +393,59 @@ function removeQuestion(question: Question) {
         </button>
         <div class="search-box">
           <Search :size="18" />
-          <input v-model="query" placeholder="搜索当前问题或答案" />
+          <input
+            v-model="query"
+            :placeholder="activeView === 'terms' ? '搜索专有名词或解释' : '搜索当前问题或答案'"
+          />
           <kbd>⌘ K</kbd>
         </div>
         <div class="topbar-note">数据已保存在本机</div>
       </header>
 
-      <section v-if="selectedGroup" class="workspace">
+      <section v-if="activeView === 'terms'" class="workspace">
+        <div class="workspace-header">
+          <div>
+            <p class="eyebrow">术语库</p>
+            <h1>专有名词表</h1>
+            <p class="group-summary">共 {{ terms.length }} 个名词，集中记录缩写、概念与技术术语</p>
+          </div>
+          <button class="primary-button" @click="openCreateTerm">
+            <Plus :size="18" stroke-width="2.5" /> 新增名词
+          </button>
+        </div>
+
+        <div v-if="visibleTerms.length" class="term-grid">
+          <article v-for="term in visibleTerms" :key="term.id" class="term-card">
+            <div class="term-heading">
+              <div class="term-mark">{{ term.name.slice(0, 1).toUpperCase() }}</div>
+              <h2>{{ term.name }}</h2>
+              <div class="term-actions">
+                <button class="icon-button" title="编辑名词" @click="openEditTerm(term)">
+                  <Pencil :size="17" />
+                </button>
+                <button class="icon-button danger" title="删除名词" @click="removeTerm(term)">
+                  <Trash2 :size="17" />
+                </button>
+              </div>
+            </div>
+            <p v-if="term.definition" class="term-definition">{{ term.definition }}</p>
+            <button v-else class="add-answer term-add-definition" @click="openEditTerm(term)">
+              <Plus :size="15" /> 添加解释
+            </button>
+          </article>
+        </div>
+
+        <div v-else class="empty-state">
+          <div class="empty-icon"><Tags :size="24" /></div>
+          <h2>{{ query ? '没有找到匹配的名词' : '专有名词表还是空的' }}</h2>
+          <p>{{ query ? '换一个关键词试试。' : '记录缩写和技术概念，查阅时更方便。' }}</p>
+          <button v-if="!query" class="secondary-button" @click="openCreateTerm">
+            <Plus :size="17" /> 新增名词
+          </button>
+        </div>
+      </section>
+
+      <section v-else-if="selectedGroup" class="workspace">
         <div class="workspace-header">
           <div>
             <p class="eyebrow">问题组</p>
@@ -364,7 +521,48 @@ function removeQuestion(question: Question) {
     </main>
 
     <Teleport to="body">
-      <div v-if="editorOpen" class="modal-backdrop" @click.self="editorOpen = false">
+      <div v-if="termEditorOpen" class="modal-backdrop" @click.self="closeTermEditorFromBackdrop">
+        <form class="editor-modal" @submit.prevent="saveTerm">
+          <div class="modal-header">
+            <div>
+              <p class="eyebrow">{{ editingTermId ? '编辑术语' : '新增术语' }}</p>
+              <h2>{{ editingTermId ? '编辑专有名词' : '记录专有名词' }}</h2>
+            </div>
+            <button type="button" class="icon-button" title="关闭" @click="termEditorOpen = false">
+              <X :size="20" />
+            </button>
+          </div>
+
+          <label class="field">
+            <span>名词</span>
+            <input
+              v-model="draftTermName"
+              autofocus
+              required
+              maxlength="100"
+              placeholder="例如：CSR、事件委托、幂等性"
+            />
+          </label>
+
+          <label class="field">
+            <span>解释</span>
+            <textarea
+              v-model="draftTermDefinition"
+              rows="7"
+              placeholder="记录它的完整含义、作用或使用场景……"
+            ></textarea>
+          </label>
+
+          <div class="modal-footer">
+            <button type="button" class="text-button" @click="termEditorOpen = false">取消</button>
+            <button type="submit" class="primary-button" :disabled="!draftTermName.trim()">
+              保存名词
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div v-if="editorOpen" class="modal-backdrop" @click.self="closeEditorFromBackdrop">
         <form class="editor-modal" @submit.prevent="saveQuestion">
           <div class="modal-header">
             <div>
