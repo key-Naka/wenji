@@ -5,6 +5,8 @@ import {
   Check,
   ChevronRight,
   CirclePlus,
+  Download,
+  GripVertical,
   Menu,
   MoreHorizontal,
   Pencil,
@@ -12,6 +14,7 @@ import {
   Search,
   Tags,
   Trash2,
+  Upload,
   X,
 } from '@lucide/vue'
 
@@ -37,6 +40,13 @@ type Term = {
 }
 
 type View = 'questions' | 'terms'
+
+type BackupData = {
+  version: 1
+  exportedAt: string
+  groups: QuestionGroup[]
+  terms: Term[]
+}
 
 const STORAGE_KEY = 'interview-notebook-groups'
 const TERMS_STORAGE_KEY = 'interview-notebook-terms'
@@ -103,16 +113,23 @@ const selectedGroupId = ref(groups.value[0]?.id ?? '')
 const query = ref('')
 const showGroupForm = ref(false)
 const newGroupName = ref('')
+const editingGroupId = ref<string | null>(null)
+const editingGroupName = ref('')
 const groupInput = ref<HTMLInputElement | null>(null)
 const sidebarOpen = ref(false)
 const editorOpen = ref(false)
 const editingQuestionId = ref<string | null>(null)
+const editingQuestionGroupId = ref<string | null>(null)
+const draftQuestionGroupId = ref('')
 const draftTitle = ref('')
 const draftAnswer = ref('')
 const termEditorOpen = ref(false)
 const editingTermId = ref<string | null>(null)
 const draftTermName = ref('')
 const draftTermDefinition = ref('')
+const dragState = ref<{ kind: 'groups' | 'questions' | 'terms'; id: string } | null>(null)
+const dragOverId = ref<string | null>(null)
+const importInput = ref<HTMLInputElement | null>(null)
 
 watch(
   groups,
@@ -183,6 +200,18 @@ function createGroup() {
   sidebarOpen.value = false
 }
 
+function startRenameGroup(group: QuestionGroup) {
+  editingGroupId.value = group.id
+  editingGroupName.value = group.name
+}
+
+function saveGroupName(group: QuestionGroup) {
+  const name = editingGroupName.value.trim()
+  if (name) group.name = name
+  editingGroupId.value = null
+  editingGroupName.value = ''
+}
+
 function selectGroup(id: string) {
   activeView.value = 'questions'
   selectedGroupId.value = id
@@ -207,6 +236,8 @@ function removeGroup(group: QuestionGroup) {
 
 function openCreateQuestion() {
   editingQuestionId.value = null
+  editingQuestionGroupId.value = null
+  draftQuestionGroupId.value = selectedGroupId.value
   draftTitle.value = ''
   draftAnswer.value = ''
   editorOpen.value = true
@@ -214,6 +245,8 @@ function openCreateQuestion() {
 
 function openEditQuestion(question: Question) {
   editingQuestionId.value = question.id
+  editingQuestionGroupId.value = selectedGroupId.value
+  draftQuestionGroupId.value = selectedGroupId.value
   draftTitle.value = question.title
   draftAnswer.value = question.answer
   editorOpen.value = true
@@ -226,19 +259,26 @@ function closeEditorFromBackdrop() {
 
 function saveQuestion() {
   const title = draftTitle.value.trim()
-  if (!title || !selectedGroup.value) return
+  const targetGroup = groups.value.find((group) => group.id === draftQuestionGroupId.value)
+  if (!title || !targetGroup) return
 
-  if (editingQuestionId.value) {
-    const question = selectedGroup.value.questions.find(
+  if (editingQuestionId.value && editingQuestionGroupId.value) {
+    const sourceGroup = groups.value.find((group) => group.id === editingQuestionGroupId.value)
+    const questionIndex = sourceGroup?.questions.findIndex(
       (item) => item.id === editingQuestionId.value,
-    )
-    if (question) {
+    ) ?? -1
+    if (sourceGroup && questionIndex >= 0) {
+      const question = sourceGroup.questions[questionIndex]
       question.title = title
       question.answer = draftAnswer.value.trim()
       question.updatedAt = Date.now()
+      if (sourceGroup.id !== targetGroup.id) {
+        sourceGroup.questions.splice(questionIndex, 1)
+        targetGroup.questions.unshift(question)
+      }
     }
   } else {
-    selectedGroup.value.questions.unshift({
+    targetGroup.questions.unshift({
       id: makeId(),
       title,
       answer: draftAnswer.value.trim(),
@@ -306,6 +346,126 @@ function removeTerm(term: Term) {
   if (!confirm(`确定删除“${term.name}”吗？`)) return
   terms.value = terms.value.filter((item) => item.id !== term.id)
 }
+
+function startDrag(kind: 'groups' | 'questions' | 'terms', id: string, event: DragEvent) {
+  if (query.value.trim()) return
+  dragState.value = { kind, id }
+  event.dataTransfer?.setData('text/plain', id)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+function dragOver(kind: 'groups' | 'questions' | 'terms', id: string) {
+  if (dragState.value?.kind === kind && dragState.value.id !== id) dragOverId.value = id
+}
+
+function reorderById<T extends { id: string }>(items: T[], sourceId: string, targetId: string) {
+  const sourceIndex = items.findIndex((item) => item.id === sourceId)
+  const targetIndex = items.findIndex((item) => item.id === targetId)
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return
+  const [moved] = items.splice(sourceIndex, 1)
+  items.splice(targetIndex, 0, moved)
+}
+
+function dropItem(kind: 'groups' | 'questions' | 'terms', targetId: string) {
+  const source = dragState.value
+  if (!source || source.kind !== kind) return endDrag()
+  if (kind === 'groups') reorderById(groups.value, source.id, targetId)
+  if (kind === 'questions' && selectedGroup.value) {
+    reorderById(selectedGroup.value.questions, source.id, targetId)
+  }
+  if (kind === 'terms') reorderById(terms.value, source.id, targetId)
+  endDrag()
+}
+
+function endDrag() {
+  dragState.value = null
+  dragOverId.value = null
+}
+
+function isQuestion(value: unknown): value is Question {
+  if (!value || typeof value !== 'object') return false
+  const question = value as Record<string, unknown>
+  return (
+    typeof question.id === 'string' &&
+    typeof question.title === 'string' &&
+    typeof question.answer === 'string' &&
+    typeof question.familiar === 'boolean' &&
+    typeof question.updatedAt === 'number'
+  )
+}
+
+function isGroup(value: unknown): value is QuestionGroup {
+  if (!value || typeof value !== 'object') return false
+  const group = value as Record<string, unknown>
+  return (
+    typeof group.id === 'string' &&
+    typeof group.name === 'string' &&
+    Array.isArray(group.questions) &&
+    group.questions.every(isQuestion)
+  )
+}
+
+function isTerm(value: unknown): value is Term {
+  if (!value || typeof value !== 'object') return false
+  const term = value as Record<string, unknown>
+  return (
+    typeof term.id === 'string' &&
+    typeof term.name === 'string' &&
+    typeof term.definition === 'string' &&
+    typeof term.updatedAt === 'number'
+  )
+}
+
+function isBackupData(value: unknown): value is BackupData {
+  if (!value || typeof value !== 'object') return false
+  const backup = value as Record<string, unknown>
+  return (
+    backup.version === 1 &&
+    typeof backup.exportedAt === 'string' &&
+    Array.isArray(backup.groups) &&
+    backup.groups.every(isGroup) &&
+    Array.isArray(backup.terms) &&
+    backup.terms.every(isTerm)
+  )
+}
+
+function exportData() {
+  const backup: BackupData = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    groups: groups.value,
+    terms: terms.value,
+  }
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  const date = new Date().toISOString().slice(0, 10)
+  link.href = url
+  link.download = `问迹备份-${date}.json`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function importData(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  try {
+    const parsed: unknown = JSON.parse(await file.text())
+    if (!isBackupData(parsed)) throw new Error('invalid backup')
+    if (!confirm('导入将覆盖当前的所有问题和专有名词，确定继续吗？')) return
+
+    groups.value = parsed.groups
+    terms.value = parsed.terms
+    selectedGroupId.value = parsed.groups[0]?.id ?? ''
+    activeView.value = parsed.groups.length ? 'questions' : 'terms'
+    query.value = ''
+  } catch {
+    alert('导入失败：请选择由问迹导出的有效 JSON 备份文件。')
+  }
+}
 </script>
 
 <template>
@@ -356,17 +516,36 @@ function removeTerm(term: Term) {
           v-for="group in groups"
           :key="group.id"
           class="group-item"
-          :class="{ active: activeView === 'questions' && group.id === selectedGroupId }"
+          :class="{
+            active: activeView === 'questions' && group.id === selectedGroupId,
+            'drag-over': dragOverId === group.id,
+            dragging: dragState?.id === group.id,
+          }"
+          :draggable="!query && editingGroupId !== group.id"
+          @dragstart="startDrag('groups', group.id, $event)"
+          @dragover.prevent="dragOver('groups', group.id)"
+          @drop.prevent="dropItem('groups', group.id)"
+          @dragend="endDrag"
         >
-          <button class="group-select" @click="selectGroup(group.id)">
-            <span class="group-dot"></span>
-            <span class="group-name">{{ group.name }}</span>
-            <span class="group-count">{{ group.questions.length }}</span>
-            <ChevronRight :size="15" class="chevron" />
-          </button>
-          <button class="group-delete" title="删除问题组" @click="removeGroup(group)">
-            <Trash2 :size="15" />
-          </button>
+          <GripVertical class="drag-handle" :size="15" aria-hidden="true" />
+          <form v-if="editingGroupId === group.id" class="group-rename" @submit.prevent="saveGroupName(group)">
+            <input v-model="editingGroupName" autofocus maxlength="30" @keydown.esc="editingGroupId = null" />
+            <button type="submit" title="保存名称"><Check :size="15" /></button>
+          </form>
+          <template v-else>
+            <button class="group-select" @click="selectGroup(group.id)">
+              <span class="group-dot"></span>
+              <span class="group-name">{{ group.name }}</span>
+              <span class="group-count">{{ group.questions.length }}</span>
+              <ChevronRight :size="15" class="chevron" />
+            </button>
+            <button class="group-edit" title="修改问题组名称" @click="startRenameGroup(group)">
+              <Pencil :size="14" />
+            </button>
+            <button class="group-delete" title="删除问题组" @click="removeGroup(group)">
+              <Trash2 :size="15" />
+            </button>
+          </template>
         </div>
       </nav>
 
@@ -399,7 +578,22 @@ function removeTerm(term: Term) {
           />
           <kbd>⌘ K</kbd>
         </div>
-        <div class="topbar-note">数据已保存在本机</div>
+        <div class="topbar-actions">
+          <input
+            ref="importInput"
+            class="file-input"
+            type="file"
+            accept="application/json,.json"
+            @change="importData"
+          />
+          <button class="icon-button" title="导入数据" aria-label="导入数据" @click="importInput?.click()">
+            <Upload :size="17" />
+          </button>
+          <button class="icon-button" title="导出数据" aria-label="导出数据" @click="exportData">
+            <Download :size="17" />
+          </button>
+          <div class="topbar-note">数据已保存在本机</div>
+        </div>
       </header>
 
       <section v-if="activeView === 'terms'" class="workspace">
@@ -465,8 +659,25 @@ function removeTerm(term: Term) {
             v-for="(question, index) in visibleQuestions"
             :key="question.id"
             class="question-card"
-            :class="{ familiar: question.familiar }"
+            :class="{
+              familiar: question.familiar,
+              'drag-over': dragOverId === question.id,
+              dragging: dragState?.kind === 'questions' && dragState.id === question.id,
+            }"
+            @dragover.prevent="dragOver('questions', question.id)"
+            @drop.prevent="dropItem('questions', question.id)"
           >
+            <div
+              class="drag-handle question-drag-handle"
+              :draggable="!query"
+              :title="query ? '清空搜索后可排序' : '拖拽调整顺序'"
+              role="button"
+              aria-label="拖拽调整顺序"
+              @dragstart="startDrag('questions', question.id, $event)"
+              @dragend="endDrag"
+            >
+              <GripVertical :size="17" aria-hidden="true" />
+            </div>
             <button
               class="check-button"
               :class="{ checked: question.familiar }"
@@ -583,6 +794,15 @@ function removeTerm(term: Term) {
               maxlength="200"
               placeholder="例如：浏览器的事件循环是如何工作的？"
             />
+          </label>
+
+          <label class="field">
+            <span>所属问题组</span>
+            <select v-model="draftQuestionGroupId" required>
+              <option v-for="group in groups" :key="group.id" :value="group.id">
+                {{ group.name }}
+              </option>
+            </select>
           </label>
 
           <label class="field">
